@@ -16,6 +16,7 @@ import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
 import com.google.mlkit.nl.translate.*;
 import java.util.*;
 public class Reader extends Service {
+ static boolean running;
  final Handler timer=new Handler(Looper.getMainLooper());
  final TextRecognizer ocr=TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
  final Translator translator=Translation.getClient(new TranslatorOptions.Builder().setSourceLanguage("zh").setTargetLanguage("ko").build());
@@ -67,6 +68,7 @@ public class Reader extends Service {
     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE|WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,PixelFormat.TRANSLUCENT);
    params.alpha=0.75f;
    wm.addView(labels,params);
+   running=true;
    Rect size=wm.getMaximumWindowMetrics().getBounds();
    resize(size.width(),size.height());
    translator.downloadModelIfNeeded().addOnSuccessListener(v->{ready=true;process();}).addOnFailureListener(e->{Toast.makeText(this,"번역 모델 다운로드 실패",Toast.LENGTH_LONG).show();stopSelf();});
@@ -125,5 +127,5 @@ public class Reader extends Service {
    labels.invalidate();
   }).addOnCompleteListener(t->{frame.recycle();busy=false;process();});
  }
- public void onDestroy(){stopped=true;timer.removeCallbacksAndMessages(null);if(display!=null)display.release();if(frames!=null)frames.close();if(projection!=null)projection.stop();if(labels!=null&&labels.isAttachedToWindow())getSystemService(WindowManager.class).removeView(labels);ocr.close();translator.close();super.onDestroy();}
+ public void onDestroy(){running=false;stopped=true;timer.removeCallbacksAndMessages(null);if(display!=null)display.release();if(frames!=null)frames.close();if(projection!=null)projection.stop();if(labels!=null&&labels.isAttachedToWindow())getSystemService(WindowManager.class).removeView(labels);ocr.close();translator.close();super.onDestroy();}
 }
