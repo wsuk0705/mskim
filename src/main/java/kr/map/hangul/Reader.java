@@ -1,5 +1,8 @@
 package kr.map.hangul;
-import android.accessibilityservice.AccessibilityService;
+import android.app.*;
+import android.media.*;
+import android.media.projection.*;
+import android.hardware.display.*;
 import android.content.*;
 import android.graphics.*;
 import android.hardware.HardwareBuffer;
@@ -12,7 +15,7 @@ import com.google.mlkit.vision.text.*;
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
 import com.google.mlkit.nl.translate.*;
 import java.util.*;
-public class Reader extends AccessibilityService {
+public class Reader extends Service {
  final Handler timer=new Handler(Looper.getMainLooper());
  final TextRecognizer ocr=TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
  final Translator translator=Translation.getClient(new TranslatorOptions.Builder().setSourceLanguage("zh").setTargetLanguage("ko").build());
@@ -20,7 +23,13 @@ public class Reader extends AccessibilityService {
  final Set<String> pending=new HashSet<>();
  Labels labels;
  boolean stopped;
- int window=-1;
+ MediaProjection projection;
+ VirtualDisplay display;
+ ImageReader frames;
+ boolean ready, busy, visible=true;
+ long last;
+ Bitmap latest;
+ int generation;
  static class Labels extends View {
   final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
   final Map<Rect,String> items=new LinkedHashMap<>();
@@ -35,45 +44,86 @@ public class Reader extends AccessibilityService {
    }
   }
  }
- protected void onServiceConnected(){
-  labels=new Labels(this);
-  WindowManager.LayoutParams p=new WindowManager.LayoutParams(-1,-1,WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE|WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,PixelFormat.TRANSLUCENT);
-  getSystemService(WindowManager.class).addView(labels,p);
-  translator.downloadModelIfNeeded().addOnSuccessListener(v->tick()).addOnFailureListener(e->Toast.makeText(this,"번역 모델 다운로드 실패. 인터넷 연결 후 서비스를 다시 켜세요.",Toast.LENGTH_LONG).show());
+
+ public IBinder onBind(Intent intent){return null;}
+ public int onStartCommand(Intent intent,int flags,int id){
+  if(intent==null || "stop".equals(intent.getAction())){stopSelf();return START_NOT_STICKY;}
+  NotificationManager nm=getSystemService(NotificationManager.class);
+  nm.createNotificationChannel(new NotificationChannel("translation","화면 번역",NotificationManager.IMPORTANCE_LOW));
+  PendingIntent end=PendingIntent.getService(this,0,new Intent(this,Reader.class).setAction("stop"),PendingIntent.FLAG_IMMUTABLE);
+  startForeground(1,new Notification.Builder(this,"translation").setSmallIcon(android.R.drawable.ic_menu_view)
+    .setContentTitle("지도 한글 화면 번역 중").addAction(0,"종료",end).build());
+  if(projection!=null)return START_NOT_STICKY;
+  try {
+   projection=getSystemService(MediaProjectionManager.class).getMediaProjection(Activity.RESULT_OK,intent.getParcelableExtra("grant",Intent.class));
+   projection.registerCallback(new MediaProjection.Callback(){
+    public void onStop(){stopSelf();}
+    public void onCapturedContentVisibilityChanged(boolean shown){visible=shown;generation++; clear();if(shown)process();}
+    public void onCapturedContentResize(int w,int h){if(display!=null && (w!=frames.getWidth()||h!=frames.getHeight()))resize(w,h);}
+   },timer);
+   WindowManager wm=getSystemService(WindowManager.class);
+   labels=new Labels(this);
+   WindowManager.LayoutParams params=new WindowManager.LayoutParams(-1,-1,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE|WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,PixelFormat.TRANSLUCENT);
+   params.alpha=0.75f;
+   wm.addView(labels,params);
+   Rect size=wm.getMaximumWindowMetrics().getBounds();
+   resize(size.width(),size.height());
+   translator.downloadModelIfNeeded().addOnSuccessListener(v->{ready=true;process();}).addOnFailureListener(e->{Toast.makeText(this,"번역 모델 다운로드 실패",Toast.LENGTH_LONG).show();stopSelf();});
+  }catch(RuntimeException e){Toast.makeText(this,"화면 공유를 다시 시작해 주세요.",Toast.LENGTH_LONG).show();stopSelf();}
+  return START_NOT_STICKY;
  }
- int active(){AccessibilityNodeInfo root=getRootInActiveWindow();return root!=null && "com.autonavi.minimap".contentEquals(String.valueOf(root.getPackageName()))?root.getWindowId():-1;}
- void later(){if(!stopped)timer.postDelayed(this::tick,350);}
- void clear(){if(labels!=null){labels.items.clear();labels.invalidate();}}
- public void onAccessibilityEvent(AccessibilityEvent event){if(active()!=window)clear();}
- public void onInterrupt(){clear();}
- void tick(){
-  if(stopped)return;
-  window=active(); final int id=window;
-  if(id<0){clear();later();return;}
-  takeScreenshotOfWindow(id,getMainExecutor(),new TakeScreenshotCallback(){
-   public void onFailure(int error){clear();later();}
-   public void onSuccess(ScreenshotResult result){
-    Bitmap bitmap;
-    try(HardwareBuffer buffer=result.getHardwareBuffer()){
-     Bitmap hardware=Bitmap.wrapHardwareBuffer(buffer,result.getColorSpace());
-     if(hardware==null){later();return;}
-     bitmap=hardware.copy(Bitmap.Config.ARGB_8888,false);hardware.recycle();
+ void resize(int w,int h){
+  generation++;clear(); latest=null;
+  ImageReader previous=frames;
+  frames=ImageReader.newInstance(w,h,PixelFormat.RGBA_8888,2);
+  int dpi=getResources().getDisplayMetrics().densityDpi;
+  if(display==null)display=projection.createVirtualDisplay("MapHangul",w,h,dpi,DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,frames.getSurface(),null,timer);
+  else {display.resize(w,h,dpi);display.setSurface(frames.getSurface());}
+  if(previous!=null)previous.close();
+  frames.setOnImageAvailableListener(reader->{
+   if(stopped||reader!=frames)return;
+   try(Image image=reader.acquireLatestImage()){
+    if(image==null||!visible)return;
+    if(latest!=null && (busy || SystemClock.elapsedRealtime()-last<220))return;
+    if(latest!=null)latest.recycle();
+    Image.Plane plane=image.getPlanes()[0];
+    int stride=plane.getRowStride()/plane.getPixelStride();
+    java.nio.ByteBuffer bytes=plane.getBuffer();
+    Bitmap padded=Bitmap.createBitmap(stride,h,Bitmap.Config.ARGB_8888);
+    if(bytes.remaining()<padded.getByteCount()){
+     java.nio.ByteBuffer full=java.nio.ByteBuffer.allocateDirect(padded.getByteCount());
+     full.put(bytes);full.rewind();bytes=full;
     }
-    if(stopped){bitmap.recycle();return;}
-    ocr.process(InputImage.fromBitmap(bitmap,0)).addOnSuccessListener(text->{
-     if(stopped||active()!=id)return;
-     labels.items.clear();
-     for(Text.TextBlock block:text.getTextBlocks())for(Text.Line line:block.getLines()){
-      String key=line.getText();Rect rect=line.getBoundingBox();
-      if(rect==null||!key.matches(".*[\\p{IsHan}].*"))continue;
-      String value=cache.get(key);
-      if(value!=null)labels.items.put(rect,value);
-      else if(pending.size()<16 && pending.add(key))translator.translate(key).addOnSuccessListener(v->cache.put(key,v)).addOnCompleteListener(t->pending.remove(key));
-     }
-     labels.invalidate();
-    }).addOnFailureListener(e->clear()).addOnCompleteListener(t->{bitmap.recycle();later();});
+    padded.copyPixelsFromBuffer(bytes);
+    latest=Bitmap.createBitmap(padded,0,0,w,h);
+    if(latest!=padded)padded.recycle();
+    process();
    }
-  });
+  },timer);
  }
- public void onDestroy(){stopped=true;timer.removeCallbacksAndMessages(null);if(labels!=null)getSystemService(WindowManager.class).removeView(labels);ocr.close();translator.close();super.onDestroy();}
+ void clear(){if(labels!=null){labels.items.clear();labels.invalidate();}}
+ final Runnable next=this::process;
+ void process(){
+  if(stopped||!visible||!ready||busy||latest==null)return;
+  long delay=250-(SystemClock.elapsedRealtime()-last);
+  if(delay>0){timer.removeCallbacks(next);timer.postDelayed(next,delay);return;}
+  Bitmap frame=latest;latest=null;busy=true;last=SystemClock.elapsedRealtime();
+  int epoch=generation;
+  ocr.process(InputImage.fromBitmap(frame,0)).addOnSuccessListener(text->{
+   if(stopped||epoch!=generation||!visible)return;
+   labels.items.clear();
+   for(Text.TextBlock block:text.getTextBlocks())for(Text.Line line:block.getLines()){
+    String key=line.getText();Rect box=line.getBoundingBox();
+    if(box==null||!key.matches(".*[\\p{IsHan}].*"))continue;
+    String value=cache.get(key);
+    if(value!=null)labels.items.put(box,value);
+    else if(pending.size()<16 && pending.add(key))translator.translate(key).addOnSuccessListener(v->{
+     cache.put(key,v);if(!stopped&&epoch==generation&&visible){labels.items.put(box,v);labels.invalidate();}
+    }).addOnCompleteListener(t->pending.remove(key));
+   }
+   labels.invalidate();
+  }).addOnCompleteListener(t->{frame.recycle();busy=false;process();});
+ }
+ public void onDestroy(){stopped=true;timer.removeCallbacksAndMessages(null);if(display!=null)display.release();if(frames!=null)frames.close();if(projection!=null)projection.stop();if(labels!=null&&labels.isAttachedToWindow())getSystemService(WindowManager.class).removeView(labels);ocr.close();translator.close();super.onDestroy();}
 }
