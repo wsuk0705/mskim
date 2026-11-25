@@ -39,7 +39,7 @@ public class Reader extends AccessibilityService {
   labels=new Labels(this);
   WindowManager.LayoutParams p=new WindowManager.LayoutParams(-1,-1,WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE|WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,PixelFormat.TRANSLUCENT);
   getSystemService(WindowManager.class).addView(labels,p);
-  translator.downloadModelIfNeeded().addOnSuccessListener(v->tick()).addOnFailureListener(e->Toast.makeText(this,"���� �� �ٿ�ε� ����. ���ͳ� ���� �� ���񽺸� �ٽ� �Ѽ���.",Toast.LENGTH_LONG).show());
+  translator.downloadModelIfNeeded().addOnSuccessListener(v->tick()).addOnFailureListener(e->Toast.makeText(this,"번역 모델 다운로드 실패. 인터넷 연결 후 서비스를 다시 켜세요.",Toast.LENGTH_LONG).show());
  }
  int active(){AccessibilityNodeInfo root=getRootInActiveWindow();return root!=null && "com.baidu.BaiduMap".contentEquals(String.valueOf(root.getPackageName()))?root.getWindowId():-1;}
  void later(){if(!stopped)timer.postDelayed(this::tick,350);}
