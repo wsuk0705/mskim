@@ -1,5 +1,5 @@
 plugins { id 'com.android.application' version '8.7.3' }
 android { namespace 'kr.map.hangul'; compileSdk 35
- defaultConfig { applicationId 'kr.map.hangul'; minSdk 34; targetSdk 35; versionCode 1; versionName '0.0.1' } }
+ defaultConfig { applicationId 'kr.map.hangul'; minSdk 34; targetSdk 35; versionCode 2; versionName '0.0.2' } }
 dependencies { implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'; implementation 'com.google.mlkit:translate:17.0.3' }
 

@@ -18,14 +18,14 @@ jobs:
       - run: |
           apk=$(find build/outputs/apk/debug -name '*.apk' -print -quit)
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"
-          cp "$apk" MapHangul-0.0.1.apk
+          cp "$apk" MapHangul-0.0.2.apk
       - uses: actions/upload-artifact@v4
         with:
           name: MapHangul-test
-          path: MapHangul-0.0.1.apk
+          path: MapHangul-0.0.2.apk
           if-no-files-found: error
       - name: Publish prototype APK
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create v0.0.1 MapHangul-0.0.1.apk --target "$GITHUB_SHA" --title "MapHangul 0.0.1" --notes "Android 14+ test APK" --prerelease
+        run: gh release create v0.0.2 MapHangul-0.0.2.apk --target "$GITHUB_SHA" --title "MapHangul 0.0.2" --notes "Android 14+ test APK" --prerelease

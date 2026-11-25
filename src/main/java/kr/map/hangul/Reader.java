@@ -41,7 +41,7 @@ public class Reader extends AccessibilityService {
   getSystemService(WindowManager.class).addView(labels,p);
   translator.downloadModelIfNeeded().addOnSuccessListener(v->tick()).addOnFailureListener(e->Toast.makeText(this,"번역 모델 다운로드 실패. 인터넷 연결 후 서비스를 다시 켜세요.",Toast.LENGTH_LONG).show());
  }
- int active(){AccessibilityNodeInfo root=getRootInActiveWindow();return root!=null && "com.baidu.BaiduMap".contentEquals(String.valueOf(root.getPackageName()))?root.getWindowId():-1;}
+ int active(){AccessibilityNodeInfo root=getRootInActiveWindow();return root!=null && "com.autonavi.minimap".contentEquals(String.valueOf(root.getPackageName()))?root.getWindowId():-1;}
  void later(){if(!stopped)timer.postDelayed(this::tick,350);}
  void clear(){if(labels!=null){labels.items.clear();labels.invalidate();}}
  public void onAccessibilityEvent(AccessibilityEvent event){if(active()!=window)clear();}
