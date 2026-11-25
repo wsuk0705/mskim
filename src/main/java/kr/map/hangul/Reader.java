@@ -17,6 +17,8 @@ import com.google.mlkit.nl.translate.*;
 import java.util.*;
 public class Reader extends Service {
  static boolean running;
+ static String status="화면 공유 대기";
+ final Map<String,String> basics=Map.ofEntries(Map.entry("出口","출구"),Map.entry("入口","입구"),Map.entry("搜索","검색"),Map.entry("酒店","호텔"),Map.entry("地铁","지하철"),Map.entry("公交","버스"),Map.entry("附近","주변"),Map.entry("导航","길안내"),Map.entry("路线","경로"),Map.entry("步行","도보"),Map.entry("卫生间","화장실"),Map.entry("停车场","주차장"));
  final Handler timer=new Handler(Looper.getMainLooper());
  final TextRecognizer ocr=TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
  final Translator translator=Translation.getClient(new TranslatorOptions.Builder().setSourceLanguage("zh").setTargetLanguage("ko").build());
@@ -40,7 +42,7 @@ public class Reader extends Service {
    else if(Character.UnicodeScript.of(cp)==Character.UnicodeScript.LATIN)latin++;
    else if(Character.isDigit(cp))digits++;
   }
-  return han>=2 && han>=latin && digits<=han && !key.matches(".*[¥￥%].*");
+  return han>0;
  }
  void render(){
   labels.items.clear();
@@ -61,7 +63,7 @@ public class Reader extends Service {
    android.graphics.Insets bars=insets==null?android.graphics.Insets.NONE:insets.getInsets(WindowInsets.Type.systemBars());
    int[] origin=new int[2];getLocationOnScreen(origin);
    float scale=(float)getWidth()/sourceWidth;
-   int fullHeight=getContext().getSystemService(WindowManager.class).getMaximumWindowMetrics().getBounds().height();
+   Point full=new Point();getDisplay().getRealSize(full);int fullHeight=full.y;
    float top=Math.abs(fullHeight-sourceHeight*scale-bars.top-bars.bottom)<Math.abs(fullHeight-sourceHeight*scale)?bars.top:0;
    canvas.translate(0,top-origin[1]);canvas.scale(scale,scale);
    ArrayList<Rect> drawn=new ArrayList<>();
@@ -72,8 +74,8 @@ public class Reader extends Service {
     paint.setTextSize(Math.min(44,r.height()*0.86f));
     float width=Math.max(1,paint.measureText(value));
     float fitted=paint.getTextSize()*Math.min(1,(r.width()-3)/width);
-    if(fitted*scale<9*getResources().getDisplayMetrics().scaledDensity)continue;
-    paint.setTextSize(fitted);
+    paint.setTextSize(Math.max(fitted, Math.min(r.height()*0.85f,12*getResources().getDisplayMetrics().scaledDensity/scale)));
+    while(value.length()>1 && paint.measureText(value)>r.width()-2)value=value.substring(0,value.length()-1);
     canvas.save();canvas.clipRect(r);
     paint.setColor(0xffffffff);canvas.drawRect(r,paint);
     paint.setColor(0xff17232b);
@@ -105,10 +107,10 @@ public class Reader extends Service {
     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE|WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,PixelFormat.TRANSLUCENT);
    params.alpha=0.75f;
    wm.addView(labels,params);
-   running=true;
+   running=true;status="화면 공유 중 · 중국어 인식 대기";
    Rect size=wm.getMaximumWindowMetrics().getBounds();
    resize(size.width(),size.height());
-   translator.downloadModelIfNeeded().addOnSuccessListener(v->{ready=true;process();}).addOnFailureListener(e->{Toast.makeText(this,"번역 모델 다운로드 실패",Toast.LENGTH_LONG).show();stopSelf();});
+   translator.downloadModelIfNeeded().addOnSuccessListener(v->{ready=true;for(String key:new HashSet<>(current.values()))lookup(key);render();}).addOnFailureListener(e->{status="기본 사전 모드 · 시작 화면에서 번역 모델을 준비하세요";Toast.makeText(this,status,Toast.LENGTH_LONG).show();});
   }catch(RuntimeException e){Toast.makeText(this,"화면 공유를 다시 시작해 주세요.",Toast.LENGTH_LONG).show();stopSelf();}
   return START_NOT_STICKY;
  }
@@ -142,10 +144,23 @@ public class Reader extends Service {
    }
   },timer);
  }
+ void add(Rect box,String key){current.put(new Rect(box),key);lookup(key);}
+ void lookup(String key){
+  if(cache.get(key)!=null)return;
+  String saved=getSharedPreferences("translations",MODE_PRIVATE).getString(key,basics.get(key));
+  if(saved!=null){cache.put(key,saved);return;}
+  if(!ready || pending.size()>=16 || !pending.add(key))return;
+  translator.translate(key).addOnSuccessListener(value->{
+   if(stopped)return;
+   cache.put(key,value);
+   if(value.matches(".*[가-힣].*"))getSharedPreferences("translations",MODE_PRIVATE).edit().putString(key,value).apply();
+   if(visible && current.containsValue(key))render();
+  }).addOnFailureListener(e->status="기기 내 번역 실패 · 모델 점검 필요").addOnCompleteListener(t->pending.remove(key));
+ }
  void clear(){current.clear();if(labels!=null){labels.items.clear();labels.invalidate();}}
  final Runnable next=this::process;
  void process(){
-  if(stopped||!visible||!ready||busy||latest==null)return;
+  if(stopped||!visible||busy||latest==null)return;
   long delay=250-(SystemClock.elapsedRealtime()-last);
   if(delay>0){timer.removeCallbacks(next);timer.postDelayed(next,delay);return;}
   Bitmap frame=latest;latest=null;busy=true;last=SystemClock.elapsedRealtime();
@@ -153,19 +168,18 @@ public class Reader extends Service {
   ocr.process(InputImage.fromBitmap(frame,0)).addOnSuccessListener(text->{
    if(stopped||epoch!=generation||!visible)return;
    current.clear();
+   status="인식된 텍스트 블록 "+text.getTextBlocks().size()+"개";
    for(Text.TextBlock block:text.getTextBlocks())for(Text.Line line:block.getLines()){
     String key=line.getText();Rect box=line.getBoundingBox();
-    if(box==null||!readableChinese(key))continue;
-    current.put(new Rect(box),key);
-    if(cache.get(key)==null && pending.size()<16 && pending.add(key)){
-     translator.translate(key).addOnSuccessListener(v->{
-      cache.put(key,v);
-      if(!stopped && visible && current.containsValue(key))render();
-     }).addOnCompleteListener(t->pending.remove(key));
+    if(box==null)continue;
+    if(readableChinese(key) && !key.matches(".*[0-9¥￥%].*"))add(box,key);
+    else for(Text.Element element:line.getElements()){
+     String part=element.getText();
+     if(element.getBoundingBox()!=null && readableChinese(part) && !part.matches(".*[¥￥%].*"))add(element.getBoundingBox(),part);
     }
    }
    render();
-  }).addOnCompleteListener(t->{frame.recycle();busy=false;process();});
+  }).addOnFailureListener(e->status="화면 글자 인식 실패").addOnCompleteListener(t->{frame.recycle();busy=false;process();});
  }
  public void onDestroy(){running=false;stopped=true;timer.removeCallbacksAndMessages(null);if(display!=null)display.release();if(frames!=null)frames.close();if(projection!=null)projection.stop();if(labels!=null&&labels.isAttachedToWindow())getSystemService(WindowManager.class).removeView(labels);ocr.close();translator.close();super.onDestroy();}
 }
